@@ -77,7 +77,7 @@ impl Value {
                 '\x08' => {
                     buf.push_str("\\b");
                 }
-                '\x14' => {
+                '\x0c' => {
                     buf.push_str("\\f");
                 }
                 '\n' => {

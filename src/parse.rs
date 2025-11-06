@@ -60,7 +60,7 @@ impl<'a> Parser<'a> {
                         s.push(b as char);
                     }
                     b'b' => s.push('\x08'),
-                    b'f' => s.push('\x14'),
+                    b'f' => s.push('\x0c'),
                     b'n' => s.push('\n'),
                     b'r' => s.push('\r'),
                     b't' => s.push('\t'),
