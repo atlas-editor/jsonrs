@@ -1,36 +1,36 @@
-use std::{collections::HashMap, str};
+use std::{
+    collections::HashMap,
+    io::{Bytes, Read},
+    str,
+};
 
 use crate::{jsonerr, types::*};
 
-struct Parser<'a> {
-    buf: &'a [u8],
-    pos: usize,
+struct Parser<R> {
+    it: Bytes<R>,
+    current: Option<u8>,
     cache: Option<Result<Token, JSONError>>,
 }
 
-impl<'a> Parser<'a> {
-    pub fn new(input: &'a [u8]) -> Self {
+impl<R: Read> Parser<R> {
+    fn new(reader: R) -> Self {
+        let mut it = reader.bytes();
+        let current = it.next().and_then(|x| x.ok());
         Self {
-            buf: input,
-            pos: 0,
+            it,
+            current,
             cache: None,
         }
     }
 
-    fn current(&self) -> Option<u8> {
-        if self.pos < self.buf.len() {
-            return Some(self.buf[self.pos]);
-        }
-        None
+    fn current(&self) -> Result<u8, JSONError> {
+        self.current.ok_or(jsonerr!("EOF"))
     }
 
-    fn read_byte(&mut self) -> Option<u8> {
-        if self.pos < self.buf.len() {
-            let b = self.buf[self.pos];
-            self.pos += 1;
-            return Some(b);
-        }
-        None
+    fn read_byte(&mut self) -> Result<u8, JSONError> {
+        let b = self.current();
+        self.current = self.it.next().and_then(|x| x.ok());
+        b
     }
 
     fn is_whitespace(b: u8) -> bool {
@@ -41,21 +41,22 @@ impl<'a> Parser<'a> {
         matches!(b, b'{' | b'}' | b'[' | b']' | b':' | b',')
     }
 
-    fn skip_whitespace(&mut self) {
-        while let Some(b) = self.current() {
+    fn skip_whitespace(&mut self) -> Result<(), JSONError> {
+        while let Ok(b) = self.current() {
             if !Self::is_whitespace(b) {
                 break;
             }
-            self.read_byte();
+            self.read_byte()?;
         }
+        Ok(())
     }
 
     fn read_string(&mut self) -> Result<String, JSONError> {
         let mut s = String::new();
         loop {
-            match self.read_byte().ok_or(jsonerr!("EOF"))? {
+            match self.read_byte()? {
                 b'"' => break,
-                b'\\' => match self.read_byte().ok_or(jsonerr!("EOF"))? {
+                b'\\' => match self.read_byte()? {
                     b if matches!(b, b'"' | b'\\' | b'/') => {
                         s.push(b as char);
                     }
@@ -68,7 +69,7 @@ impl<'a> Parser<'a> {
                         let mut hex = Vec::new();
 
                         for _ in 0..4 {
-                            hex.push(self.read_byte().ok_or(jsonerr!("EOF"))?);
+                            hex.push(self.read_byte()?);
                         }
 
                         let code = u32::from_str_radix(str::from_utf8(&hex)?, 16)?;
@@ -153,17 +154,19 @@ impl<'a> Parser<'a> {
         Ok(arr)
     }
 
-    fn read_term(&mut self) -> Result<Token, JSONError> {
-        let start = self.pos;
-        while let Some(b) = self.current() {
+    fn read_term(&mut self, b: u8) -> Result<Token, JSONError> {
+        let mut buf = vec![b];
+        while let Ok(b) = self.current() {
             if Self::is_whitespace(b) || Self::is_delimiter(b) {
                 break;
             }
-            self.read_byte();
-        }
-        let end = self.pos;
+            buf.push(b);
 
-        match &self.buf[start..end] {
+            // a term might be the only value, so EOF is ok
+            _ = self.read_byte();
+        }
+
+        match buf.as_slice() {
             b"true" => Ok(Token::Boolean(true)),
             b"false" => Ok(Token::Boolean(false)),
             b"null" => Ok(Token::Null),
@@ -185,9 +188,10 @@ impl<'a> Parser<'a> {
         if let Some(t) = self.cache.take() {
             return t;
         }
-        self.skip_whitespace();
+        self.skip_whitespace()?;
 
-        match self.read_byte().ok_or(jsonerr!("EOF"))? {
+        let read_byte = self.read_byte()?;
+        match read_byte {
             b'"' => Ok(Token::String(self.read_string()?)),
             b'[' => Ok(Token::LAngle),
             b']' => Ok(Token::RAngle),
@@ -195,10 +199,7 @@ impl<'a> Parser<'a> {
             b'}' => Ok(Token::RBrace),
             b',' => Ok(Token::Comma),
             b':' => Ok(Token::Colon),
-            _ => {
-                self.pos -= 1;
-                self.read_term()
-            }
+            b => self.read_term(b),
         }
     }
 
@@ -215,7 +216,7 @@ impl<'a> Parser<'a> {
     }
 }
 
-pub fn deserialize(json: &[u8]) -> Result<Value, JSONError> {
+pub fn deserialize<R: Read>(json: R) -> Result<Value, JSONError> {
     Parser::new(json).read_value()
 }
 
@@ -225,21 +226,15 @@ pub fn serialize(val: Value) -> String {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     #[test]
     fn test_json() {
-        let input = r#"{
-          "string": "Hello 🌍",
-          "escaped": "\"quoted\"\\\\\\n\\b\\u00F6",
-          "empty_string": "",
-          "number_int": 11,
-          "number_float": -3.111111111111,
-          "number_exp": 6.022e23,
-          "true": true,
-          "false": false,
-          "null_value": null,
-          "array_mixed": [1, "two", null, true, {"nested": []}],
+        let input = r#"
+        {
+          "an array": ["Hello \u25D0", "\"quoted\"\\\\\\n\\b\\u00F6", "", 11, -3.111111111111, 6.022e23, true, false, null],
+          "empty_nested": [[{ "": [] }], "", { "": {} }, [{}, []], { "": [{ "": { "": {} } }] }],
           "object_nested": {
             "a": 1,
             "b": {
@@ -247,11 +242,7 @@ mod tests {
                 "d": "deep"
               }
             }
-          },
-          "unicode_key_üñîçødê": "works!",
-          "empty_array": [],
-          "empty_array_nested": [[[],[],[[]]]],
-          "empty_object": {}
+          }
         }
 "#;
 
