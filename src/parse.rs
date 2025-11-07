@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{Bytes, Read},
+    io::{BufRead, BufReader, Bytes, Read},
     str,
 };
 
@@ -218,6 +218,14 @@ impl<R: Read> Parser<R> {
 
 pub fn deserialize<R: Read>(json: R) -> Result<Value, JSONError> {
     Parser::new(json).read_value()
+}
+
+pub fn deserialize_per_line<R: Read>(jsonl: R) -> impl Iterator<Item = Result<Value, JSONError>> {
+    BufReader::new(jsonl).lines().map(|line_res| {
+        line_res
+            .map_err(JSONError::from)
+            .and_then(|line| deserialize(line.as_bytes()))
+    })
 }
 
 pub fn serialize(val: Value) -> String {
